@@ -1,0 +1,159 @@
+name: Terraform CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'environment/**'
+      - 'modules/**'
+      - '.github/workflows/cd.yml'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terraform_cd:
+    name: Terraform Plan & Apply
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ./environment/preprod
+
+    steps:
+
+      # ------------------------------------------------
+      # 1. Checkout Code
+      # ------------------------------------------------
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+
+      # ------------------------------------------------
+      # 2. Azure Login using OIDC
+      # ------------------------------------------------
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+
+      # ------------------------------------------------
+      # 3. Verify Azure Authentication
+      # ------------------------------------------------
+      - name: Verify Azure Login
+        run: |
+          az account show --output table
+
+
+      # ------------------------------------------------
+      # 4. Setup Terraform
+      # ------------------------------------------------
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.8.5
+
+
+      # ------------------------------------------------
+      # 5. Terraform Format Check
+      # ------------------------------------------------
+      - name: Terraform Format Check
+        id: fmt
+        run: terraform fmt -check -recursive ../../
+
+
+      # ------------------------------------------------
+      # 6. Terraform Init
+      # ------------------------------------------------
+      - name: Terraform Init
+        id: init
+        run: terraform init -input=false
+
+
+      # ------------------------------------------------
+      # 7. Terraform Validate
+      # ------------------------------------------------
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate
+
+
+      # ------------------------------------------------
+      # 8. Terraform Plan
+      # ------------------------------------------------
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan \
+            -out=tfplan \
+            -input=false \
+            -no-color \
+            2>&1 | tee plan_info.txt
+
+
+      # ------------------------------------------------
+      # 9. Upload Terraform Plan
+      # ------------------------------------------------
+      - name: Upload Plan Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ github.run_number }}
+          path: |
+            environment/preprod/tfplan
+            environment/preprod/plan_info.txt
+          retention-days: 7
+
+
+      # ------------------------------------------------
+      # 10. Terraform Apply
+      # ------------------------------------------------
+      - name: Terraform Apply
+        id: apply
+        run: |
+          terraform apply \
+            -input=false \
+            -auto-approve \
+            tfplan
+
+
+      # ------------------------------------------------
+      # 11. Execution Summary
+      # ------------------------------------------------
+      - name: Execution Summary
+        if: always()
+        run: |
+          echo "======================================"
+          echo " Terraform CD Execution Summary"
+          echo "======================================"
+          echo "Format:   ${{ steps.fmt.outcome }}"
+          echo "Init:     ${{ steps.init.outcome }}"
+          echo "Validate: ${{ steps.validate.outcome }}"
+          echo "Plan:     ${{ steps.plan.outcome }}"
+          echo "Apply:    ${{ steps.apply.outcome }}"
+          echo "======================================"
+
+
+      # ------------------------------------------------
+      # 12. Success Notification
+      # ------------------------------------------------
+      - name: Notify Success
+        if: success()
+        run: |
+          echo "✅ Terraform Apply completed successfully!"
+          echo "✅ Azure resources provisioned successfully."
+
+
+      # ------------------------------------------------
+      # 13. Failure Notification
+      # ------------------------------------------------
+      - name: Notify Failure
+        if: failure()
+        run: |
+          echo "❌ Terraform CD Pipeline failed."
+          echo "❌ Check the GitHub Actions logs."
